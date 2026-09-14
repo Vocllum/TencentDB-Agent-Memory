@@ -1,0 +1,68 @@
+name: Validate PR 909 replay
+
+on:
+  push:
+    branches: [ci/validate-909-20260915]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          fetch-depth: 3
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: MemoryPanel/package-lock.json
+
+      - name: Install MemoryPanel dependencies
+        working-directory: MemoryPanel
+        run: npm ci
+
+      - name: Typecheck MemoryPanel
+        working-directory: MemoryPanel
+        run: npm run typecheck
+
+      - name: Exercise legacy/new asset-id parser
+        working-directory: MemoryPanel
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/panel/http/routes/chat-memory.ts')
+          s = p.read_text()
+          needle = 'function parseChatMemoryAssetId(assetId: string): { teamId: string; agentId: string } | null {'
+          assert needle in s
+          p.write_text(s.replace(needle, 'export ' + needle, 1))
+          PY
+          cat > /tmp/check-909.ts <<'TS'
+          import assert from 'node:assert/strict'
+          import { parseChatMemoryAssetId } from '${{ github.workspace }}/MemoryPanel/src/panel/http/routes/chat-memory.ts'
+
+          const cases: Array<[string, unknown]> = [
+            ['chat_memory-team-agtalpha', { teamId: 'team', agentId: 'agtalpha' }],
+            ['chat_memory-team-default', { teamId: 'team', agentId: 'default' }],
+            ['chat_memory-team-qem9cpvr7y-default', { teamId: 'team-qem9cpvr7y', agentId: 'default' }],
+            ['chat_memory-a-b-c', { teamId: 'a-b', agentId: 'c' }],
+            ['chat_memory-team-', null],
+            ['chat_memory--agent', null],
+            ['chat_memory-team', null],
+            ['not_chat_memory-team-default', null],
+          ]
+
+          for (const [input, expected] of cases) {
+            assert.deepEqual(parseChatMemoryAssetId(input), expected, input)
+          }
+          console.log(`${cases.length}/${cases.length} parser cases passed`)
+          TS
+          npx tsx /tmp/check-909.ts
+
+      - name: Verify feature diff
+        run: git diff --check HEAD~2...HEAD
